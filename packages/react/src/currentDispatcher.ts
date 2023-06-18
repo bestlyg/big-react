@@ -4,6 +4,10 @@ export type Dispatcher = {
 	useState: <T>(initialState: (() => T) | T) => [T, Dispatch<T>];
 	useEffect: (callback: (() => void) | void, deps: any[] | void) => void;
 	useRef: <T>(initialValue: T) => { current: T };
+	useSyncExternalStore: <T>(
+		subscribe: (fn: () => void) => void,
+		getSnapshot: () => T
+	) => T;
 };
 
 export type Dispatch<State> = (action: Action<State>) => void;

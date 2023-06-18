@@ -17,7 +17,8 @@ import {
 	mergeLanes,
 	NoLane,
 	NoLanes,
-	requestUpdateLane
+	requestUpdateLane,
+	SyncLane
 } from './fiberLanes';
 import { Flags, PassiveEffect } from './fiberFlags';
 import { HookHasEffect, Passive } from './hookEffectTags';
@@ -69,13 +70,15 @@ export const renderWithHooks = (workInProgress: FiberNode, lane: Lane) => {
 const HooksDispatcherOnMount: Dispatcher = {
 	useState: mountState,
 	useEffect: mountEffect,
-	useRef: mountRef
+	useRef: mountRef,
+	useSyncExternalStore: mountSyncExternalStore
 };
 
 const HooksDispatcherOnUpdate: Dispatcher = {
 	useState: updateState,
 	useEffect: updateEffect,
-	useRef: updateRef
+	useRef: updateRef,
+	useSyncExternalStore: updateSyncExternalStore
 };
 
 function mountState<State>(
@@ -375,4 +378,118 @@ function updateWorkInProgressHook(): Hook {
 		}
 	}
 	return workInProgressHook as Hook;
+}
+
+type StoreInstance<T> = {
+	value: T;
+	getSnapshot: () => T;
+};
+
+function checkIfSnapshotChanged<T>(inst: StoreInstance<T>): boolean {
+	const latestGetSnapshot = inst.getSnapshot;
+	const prevValue = inst.value;
+	try {
+		const nextValue = latestGetSnapshot();
+		return !Object.is(prevValue, nextValue);
+	} catch (error) {
+		return true;
+	}
+}
+
+function forceStoreRerender(fiber: FiberNode) {
+	scheduleUpdateOnFiber(fiber, SyncLane);
+}
+
+function subscribeToStore<T>(
+	fiber: FiberNode,
+	inst: StoreInstance<T>,
+	subscribe: (fn: () => void) => void
+) {
+	const handleStoreChange = () => {
+		if (checkIfSnapshotChanged(inst)) {
+			forceStoreRerender(fiber);
+		}
+	};
+	return subscribe(handleStoreChange);
+}
+
+function updateStoreInstance<T>(
+	fiber: FiberNode,
+	inst: StoreInstance<T>,
+	nextSnapshot: T,
+	getSnapshot: () => T
+): void {
+	inst.value = nextSnapshot;
+	inst.getSnapshot = getSnapshot;
+
+	if (checkIfSnapshotChanged(inst)) {
+		forceStoreRerender(fiber);
+	}
+}
+
+function mountSyncExternalStore<T>(
+	subscribe: (fn: () => void) => void,
+	getSnapshot: () => T
+) {
+	const fiber = currentlyRenderingFiber!;
+	const hook = mountWorkInProgressHook();
+	const nextSnapshot = getSnapshot();
+	hook.memoizedState = nextSnapshot;
+	const inst: StoreInstance<T> = {
+		value: nextSnapshot,
+		getSnapshot
+	};
+	hook.updateQueue = inst;
+
+	mountEffect(subscribeToStore.bind(null, fiber, inst, subscribe), [subscribe]);
+
+	fiber.flags |= PassiveEffect;
+	pushEffect(
+		HookHasEffect | Passive,
+		updateStoreInstance.bind(null, fiber, inst, nextSnapshot, getSnapshot),
+		undefined,
+		null
+	);
+
+	return nextSnapshot;
+}
+
+function updateSyncExternalStore<T>(
+	subscribe: (fn: () => void) => void,
+	getSnapshot: () => T
+) {
+	const fiber = currentlyRenderingFiber!;
+	const hook = updateWorkInProgressHook();
+
+	const nextSnapshot = getSnapshot();
+	const prevSnapshot = hook.memoizedState;
+
+	const snapshotChanged = !Object.is(prevSnapshot, nextSnapshot);
+
+	if (snapshotChanged) {
+		hook.memoizedState = nextSnapshot;
+	}
+
+	const inst = hook.updateQueue as StoreInstance<T>;
+
+	updateEffect(subscribeToStore.bind(null, fiber, inst, subscribe), [
+		subscribe
+	]);
+
+	if (
+		inst.getSnapshot !== getSnapshot ||
+		snapshotChanged ||
+		(workInProgressHook !== null &&
+			workInProgressHook.memoizedState.tag & HookHasEffect)
+	) {
+		fiber.flags |= PassiveEffect;
+		pushEffect(
+			HookHasEffect | Passive,
+			updateStoreInstance.bind(null, fiber, inst, nextSnapshot, getSnapshot),
+			undefined,
+			null
+		);
+	}
+
+	return nextSnapshot;
 }
